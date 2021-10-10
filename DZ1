@@ -1,0 +1,97 @@
+Разбил на несколько блоков для удобства. Плюс некоторые уточнения по методам работы.
+1. К машинам подключаюсь через Putty.
+2. Авторизация - строго по ключам.
+
+Блок 1, создание и настройка ВМ.
+проект называется postgres2021-23061980
+виртуалку создавал через GUI, добавил разрешения на почту ifti@yandex.ru.
+пришлось повозиться с ssh-agent, хотя когда создавал второго пользователя для 2й сессии - все заработало и без добавления ключа через ssh-add
+Жаль, что не нашел варианта использования gcloud через командную строку винды или PWSH, хотя целенаправленно не искал. Надо будет попробовать состыковать с PWSH7.
+Ключи в метадату добавил, сначала установил 12 PSQL (идет по дефолту), потом поставил 14 и удалил его.
+Код по установке, настройке и апгрейду опускаю, т.к. частично сделал сам, частично стащил из Вашего скрипт-листа.
+
+Блок 2. Работа с задачами в psql
+Таблицу создал. Текущий уровень изоляции - read committed.
+Добавил запись в первой сессии, сделал селект во второй.
+Селект показал состояние таблицы, до начала транзакции с добавлением, что не удивительно, т.к. commit по транзакции еще не прошел.
+Сделал commit в первой сессий, в результате - во второй селект показал Сергея Сергеева. Логично, т.к. транзакция завершена, данные из слепка таблицы применидлись к самой таблице.
+Повышаем ставки. Repeateble read.
+Добавили в таблицу Свету Светову на первой консоли. На второй - селект не показал ее, но на первой - пожалуйста, в слепке данных таблицы она присутсвует.
+Теперь мякотка от Repeatable read. На первой консоли прошел коммит, на второй - нет. При этом селект на второй консоли упорно отказывался видеть Свету. Осознание причины этого меня приятно удивило.
+Это связано с тем, что Repeateble Read отличается от Read Committed состоянием слепка данных (он формируется на момент начала первого оператора транзакции), что позволяет работать со слепком данных с гарантией того, что в рамках текущей транзакции они не изменятся. Поэтому можно делать несколько селектов в рамках одной транзакции, а так же быть уверенным, что таблицы, изменяемые другими транзакциями, все равно будет показывать нам только те данные, которые были committed.
+
+Запросы, выполняемые на консолях:
+Общие:
+sudo -u postgres psql
+\c iso
+\set AUTOCOMMIT OFF
+create table persons(id serial, first_name text, second_name text); insert into persons(first_name, second_name) values('ivan', 'ivanov'); insert into persons(first_name, second_name) values('petr', 'petrov'); commit;
+show transaction isolation level;
+1st console
+--начало транзакции
+insert into persons(first_name, second_name) values('sergey', 'sergeev');
+2nd console
+select * from persons;
+ id | first_name | second_name
+----+------------+-------------
+  1 | ivan       | ivanov
+  2 | petr       | petrov
+(2 rows)
+
+1st console
+commit;
+2nd console
+select * from persons;
+ id | first_name | second_name
+----+------------+-------------
+  1 | ivan       | ivanov
+  2 | petr       | petrov
+  3 | sergey     | sergeev
+(3 rows)
+set transaction isolation level repeatable read;
+commit;
+
+1st console
+insert into persons(first_name, second_name) values('sveta', 'svetova');
+2nd console
+select * from persons;
+ id | first_name | second_name
+----+------------+-------------
+  1 | ivan       | ivanov
+  2 | petr       | petrov
+  3 | sergey     | sergeev
+(3 rows)
+
+1st console
+commit;
+2nd console
+select * from persons;
+ id | first_name | second_name
+----+------------+-------------
+  1 | ivan       | ivanov
+  2 | petr       | petrov
+  3 | sergey     | sergeev
+(3 rows)
+
+commit;
+select * from persons;
+ id | first_name | second_name
+----+------------+-------------
+  1 | ivan       | ivanov
+  2 | petr       | petrov
+  3 | sergey     | sergeev
+  4 | sveta      | svetova
+(4 rows)
+
+Так же решил немного забежать вперед и посмотреть задание на следующее занятие. Прочитал задание со звездочкой, решил его сделать, но немного в своем ключе. Как я понял, задача - сделать так, чтобы база лежала на отдельном диске.
+Решил ее следующим образом:
+В GCP - Disks создал диск на 10 GB, остановил инстанс ВМ, в настройках ВМ подключил диск, запустил ВМ.
+дальше - дело техники... и чтения мануалов ))
+lsblk - чтобы узнать логическое имя устройства. Почти на 100% был уверен, что sdb, но чем гугол не шутит?
+
+sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/sdb && service postgresql stop && sudo cp -R /var/lib/postgresql ~/tmp && rm -rf /var/lib/postgresql && sudo mount -o discard,defaults /dev/sdb /var/lib/postgresql && sudo cp -R ~/tmp /var/lib/postgresql && service psotgresql start &&pg_lsclusters
+
+Все, база на месте, сервис запущен, в базу можно зайти и увидеть Светлану ))
+Решение не самое элегантное, правильнее было бы не монтировать диск в середину /var/lib, а сделать линк на /mnt/sdb, к которой примонтирован жесткий диск. В следующий раз так и поступлю )))
+
+
